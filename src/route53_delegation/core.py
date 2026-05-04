@@ -312,3 +312,51 @@ def build_parent_cleanup_change_set(
                 continue
             changes.append({"Action": "DELETE", "ResourceRecordSet": deepcopy(live_record)})
     return changes, skipped
+
+
+def zone_file_skip_reason(record: dict[str, Any], target_name: str) -> str | None:
+    normalized_name = normalize_dns_name(record["Name"])
+    normalized_target = normalize_dns_name(target_name)
+    if "AliasTarget" in record:
+        return "alias_record_not_supported_in_bind_export"
+    if "SetIdentifier" in record:
+        return "routing_policy_record_not_supported_in_bind_export"
+    if "HealthCheckId" in record:
+        return "health_check_record_not_supported_in_bind_export"
+    if "ResourceRecords" not in record:
+        return "record_without_resource_records_not_supported_in_bind_export"
+    if normalized_name == normalized_target and record["Type"] in {"NS", "SOA"}:
+        return "child_zone_apex_managed_by_route53"
+    return None
+
+
+def format_zone_file_record_line(record: dict[str, Any], value: str) -> str:
+    ttl = record.get("TTL", 300)
+    return f"{fqdn(record['Name'])} {ttl} IN {record['Type']} {value}"
+
+
+def build_zone_file_export(inventory_snapshot: dict[str, Any], target_name: str) -> tuple[list[str], list[dict[str, Any]]]:
+    target_snapshot = find_target_snapshot(inventory_snapshot, target_name)
+    lines: list[str] = []
+    skipped: list[dict[str, Any]] = []
+    for record in target_snapshot.get("source_records", []):
+        reason = zone_file_skip_reason(record, target_name)
+        if reason is not None:
+            skipped.append({"record_key": make_record_key(record), "reason": reason, "record": summarize_record(record)})
+            continue
+        for resource_record in record["ResourceRecords"]:
+            lines.append(format_zone_file_record_line(record, resource_record["Value"]))
+    return lines, skipped
+
+
+def pick_verification_record(inventory_snapshot: dict[str, Any], target_name: str) -> dict[str, Any] | None:
+    target_snapshot = find_target_snapshot(inventory_snapshot, target_name)
+    for record in target_snapshot.get("source_records", []):
+        if record["Type"] in {"NS", "SOA"}:
+            continue
+        if "AliasTarget" in record:
+            continue
+        if "ResourceRecords" not in record:
+            continue
+        return deepcopy(record)
+    return None

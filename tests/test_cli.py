@@ -281,3 +281,71 @@ def test_cleanup_parent_dry_run_skips_delegation_record(tmp_path: Path) -> None:
     payload = yaml.safe_load(output_path.read_text(encoding="utf-8"))
     assert payload["attempted_change_count"] == 1
     assert payload["skipped_changes"][0]["reason"] == "delegation_record_preserved"
+
+
+def test_export_zone_file_writes_bind_style_lines(tmp_path: Path) -> None:
+    inventory_path = tmp_path / "inventory.yaml"
+    inventory_path.write_text(
+        yaml.safe_dump(
+            {
+                "targets": [
+                    {
+                        "name": "abc.xyz.com.",
+                        "source_records": [
+                            {"Name": "abc.xyz.com.", "Type": "NS", "TTL": 300, "ResourceRecords": [{"Value": "ns-1"}]},
+                            {"Name": "a.abc.xyz.com.", "Type": "A", "TTL": 300, "ResourceRecords": [{"Value": "192.0.2.11"}]},
+                        ],
+                    }
+                ]
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "abc.zone"
+    args = SimpleNamespace(inventory=str(inventory_path), target="abc.xyz.com", output=str(output_path))
+    assert cli.run_export_zone_file(args) == 0
+    content = output_path.read_text(encoding="utf-8")
+    assert "a.abc.xyz.com. 300 IN A 192.0.2.11" in content
+    assert "skipped abc.xyz.com. NS" in content
+
+
+def test_verify_delegation_writes_structured_results(tmp_path: Path) -> None:
+    manifest_path = write_manifest(tmp_path)
+    inventory_path = tmp_path / "inventory.yaml"
+    inventory_path.write_text(
+        yaml.safe_dump(
+            {
+                "targets": [
+                    {
+                        "name": "abc.xyz.com.",
+                        "source_records": [
+                            {"Name": "abc.xyz.com.", "Type": "NS", "TTL": 300, "ResourceRecords": [{"Value": "ns-1"}]},
+                            {"Name": "a.abc.xyz.com.", "Type": "A", "TTL": 300, "ResourceRecords": [{"Value": "192.0.2.11"}]},
+                        ],
+                    }
+                ]
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "verify.yaml"
+    fake_service = FakeRoute53Service()
+    args = SimpleNamespace(manifest=str(manifest_path), inventory=str(inventory_path), output=str(output_path))
+    with (
+        patch("route53_delegation.cli.create_route53_service", return_value=fake_service),
+        patch("route53_delegation.cli.dig_short", return_value=["ns-1.awsdns.com.", "ns-2.awsdns.net."]),
+        patch(
+            "route53_delegation.cli.dig_full",
+            side_effect=[
+                "abc.xyz.com. 300 IN NS ns-1.awsdns.com.\na.abc.xyz.com. 300 IN A 192.0.2.11\n",
+                ";; flags: qr aa rd ra;\n;; ANSWER SECTION:\na.abc.xyz.com. 300 IN A 192.0.2.11\n;; Query time: 1 msec\n",
+                ";; flags: qr aa rd ra;\n;; ANSWER SECTION:\na.abc.xyz.com. 300 IN A 192.0.2.11\n;; Query time: 1 msec\n",
+            ],
+        ),
+    ):
+        assert cli.run_verify_delegation(args) == 0
+    payload = yaml.safe_load(output_path.read_text(encoding="utf-8"))
+    assert payload["targets"][0]["delegation_matches"] is True
+    assert payload["targets"][0]["authoritative_checks"][0]["authoritative"] is True

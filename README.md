@@ -11,6 +11,8 @@ The CLI now covers the main migration phases:
 5. populate child hosted zones
 6. add parent-zone `NS` delegations
 7. clean up migrated records from the parent zone
+8. export one target subtree as a BIND-style zone file
+9. verify live delegation with `dig`
 
 ## What the Tool Does
 
@@ -206,6 +208,36 @@ To actually delete the migrated parent-zone records:
 uv run route53-delegation cleanup-parent --manifest manifest.yaml --inventory artifacts/inventory.yaml --apply --output artifacts/cleanup-parent.yaml
 ```
 
+### 8. Export a Zone File
+
+This exports one target subtree from the inventory artifact into a BIND-style zone file that is suitable for review and often useful as a starting point for Route 53 console import workflows.
+
+```bash
+uv run route53-delegation export-zone-file --inventory artifacts/inventory.yaml --target abc.xyz.com --output artifacts/abc.xyz.com.zone
+```
+
+Notes:
+
+- standard records are emitted one value per line
+- unsupported Route 53-specific records are written as comments with skip reasons
+- apex child-zone `NS` and `SOA` records are skipped because Route 53 manages them automatically
+
+### 9. Verify Delegation
+
+This checks the live child hosted zones, compares the expected child-zone name servers with recursive `NS` resolution, and runs authoritative `dig` queries against the child-zone name servers for one sample record per target.
+
+```bash
+uv run route53-delegation verify-delegation --manifest manifest.yaml --inventory artifacts/inventory.yaml --output artifacts/verify-delegation.yaml
+```
+
+The verification artifact includes:
+
+- expected child-zone name servers from Route 53
+- recursive `NS` answers for the target
+- whether the delegation matches
+- direct authoritative answers from the child-zone name servers
+- a trace excerpt for the sample record
+
 ## Example Workflow
 
 ```bash
@@ -216,6 +248,8 @@ uv run route53-delegation create-child-zones --manifest manifest.yaml
 uv run route53-delegation populate-child-zones --manifest manifest.yaml --inventory artifacts/inventory.yaml
 uv run route53-delegation delegate-subdomains --manifest manifest.yaml
 uv run route53-delegation cleanup-parent --manifest manifest.yaml --inventory artifacts/inventory.yaml
+uv run route53-delegation export-zone-file --inventory artifacts/inventory.yaml --target abc.xyz.com --output artifacts/abc.xyz.com.zone
+uv run route53-delegation verify-delegation --manifest manifest.yaml --inventory artifacts/inventory.yaml
 ```
 
 Then, once you have reviewed each dry-run artifact:
@@ -247,6 +281,7 @@ env UV_CACHE_DIR=.uv-cache uv run pytest
 - [src/route53_delegation/cli.py](/Users/jose/Documents/Codex/2026-05-03/i-use-aws-route53-where-i/src/route53_delegation/cli.py): CLI entrypoint
 - [src/route53_delegation/core.py](/Users/jose/Documents/Codex/2026-05-03/i-use-aws-route53-where-i/src/route53_delegation/core.py): record filtering, planning, and TTL change logic
 - [src/route53_delegation/aws.py](/Users/jose/Documents/Codex/2026-05-03/i-use-aws-route53-where-i/src/route53_delegation/aws.py): Route 53 API wrapper
+- [src/route53_delegation/dns.py](/Users/jose/Documents/Codex/2026-05-03/i-use-aws-route53-where-i/src/route53_delegation/dns.py): `dig` helpers for delegation verification
 - [src/route53_delegation/manifest.py](/Users/jose/Documents/Codex/2026-05-03/i-use-aws-route53-where-i/src/route53_delegation/manifest.py): manifest parsing and validation
 - [tests/test_cli.py](/Users/jose/Documents/Codex/2026-05-03/i-use-aws-route53-where-i/tests/test_cli.py) and [tests/test_core.py](/Users/jose/Documents/Codex/2026-05-03/i-use-aws-route53-where-i/tests/test_core.py): test coverage
 
@@ -257,3 +292,4 @@ env UV_CACHE_DIR=.uv-cache uv run pytest
 - TTL reduction skips records that should not be changed in this first version, such as alias records and `NS`/`SOA` records.
 - Child-zone population skips the child zone's apex `NS` and `SOA` records because Route 53 manages them automatically.
 - Parent cleanup preserves the new delegation `NS` record at the target apex.
+- `verify-delegation` relies on the local `dig` command being available in the operator environment.

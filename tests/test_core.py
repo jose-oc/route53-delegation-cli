@@ -11,7 +11,9 @@ from route53_delegation.core import (
     build_record_lookup,
     build_ttl_change_set,
     build_ttl_plan,
+    build_zone_file_export,
     normalize_dns_name,
+    pick_verification_record,
     record_belongs_to_target,
     ttl_skip_reason,
 )
@@ -173,3 +175,44 @@ def test_parent_cleanup_change_set_skips_delegation_and_deletes_live_records() -
     assert changes[0]["Action"] == "DELETE"
     assert changes[0]["ResourceRecordSet"]["TTL"] == 120
     assert skipped[0]["reason"] == "delegation_record_preserved"
+
+
+def test_zone_file_export_skips_alias_and_formats_standard_records() -> None:
+    inventory_snapshot = {
+        "targets": [
+            {
+                "name": "abc.xyz.com.",
+                "source_records": [
+                    {"Name": "abc.xyz.com.", "Type": "NS", "TTL": 300, "ResourceRecords": [{"Value": "ns-1"}]},
+                    {"Name": "a.abc.xyz.com.", "Type": "A", "TTL": 300, "ResourceRecords": [{"Value": "192.0.2.11"}]},
+                    {
+                        "Name": "b.abc.xyz.com.",
+                        "Type": "A",
+                        "AliasTarget": {"DNSName": "lb.example.net.", "HostedZoneId": "ZLB", "EvaluateTargetHealth": False},
+                    },
+                ],
+            }
+        ]
+    }
+    lines, skipped = build_zone_file_export(inventory_snapshot, "abc.xyz.com")
+    assert lines == ["a.abc.xyz.com. 300 IN A 192.0.2.11"]
+    assert skipped[0]["reason"] == "child_zone_apex_managed_by_route53"
+    assert skipped[1]["reason"] == "alias_record_not_supported_in_bind_export"
+
+
+def test_pick_verification_record_uses_standard_non_ns_record() -> None:
+    inventory_snapshot = {
+        "targets": [
+            {
+                "name": "abc.xyz.com.",
+                "source_records": [
+                    {"Name": "abc.xyz.com.", "Type": "SOA", "TTL": 900, "ResourceRecords": [{"Value": "soa"}]},
+                    {"Name": "abc.xyz.com.", "Type": "NS", "TTL": 300, "ResourceRecords": [{"Value": "ns-1"}]},
+                    {"Name": "a.abc.xyz.com.", "Type": "A", "TTL": 300, "ResourceRecords": [{"Value": "192.0.2.11"}]},
+                ],
+            }
+        ]
+    }
+    record = pick_verification_record(inventory_snapshot, "abc.xyz.com")
+    assert record is not None
+    assert record["Name"] == "a.abc.xyz.com."
