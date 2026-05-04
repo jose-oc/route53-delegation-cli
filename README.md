@@ -39,6 +39,37 @@ The tool then:
 
 ## Build and Install
 
+### Option 0: Install from a Release Wheel
+
+If you have downloaded a release `.whl` file from GitHub, you can install the tool without cloning this repository.
+
+Example:
+
+```bash
+python3 -m pip install route53_delegation_cli-0.1.0-py3-none-any.whl
+```
+
+After installation, run:
+
+```bash
+route53-delegation --help
+```
+
+If you want to upgrade an existing installation from a newer wheel:
+
+```bash
+python3 -m pip install --upgrade route53_delegation_cli-0.1.0-py3-none-any.whl
+```
+
+If you prefer installing into an isolated virtual environment:
+
+```bash
+python3 -m venv route53-delegation-venv
+source route53-delegation-venv/bin/activate
+python3 -m pip install route53_delegation_cli-0.1.0-py3-none-any.whl
+route53-delegation --help
+```
+
 ### Option 1: Install with `uv`
 
 From this directory:
@@ -112,6 +143,8 @@ Fields:
 - `parent_zone.hosted_zone_id`: optional Route 53 hosted zone ID; recommended when you want to avoid lookup ambiguity
 - `targets[].name`: subdomain to prepare for delegation
 - `targets[].pre_cutover_ttl`: TTL to set on eligible records before delegation
+
+If you installed from a wheel and do not have the repository locally, create this manifest yourself in any working directory before running the tool.
 
 ## Usage
 
