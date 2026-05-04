@@ -349,3 +349,79 @@ def test_verify_delegation_writes_structured_results(tmp_path: Path) -> None:
     payload = yaml.safe_load(output_path.read_text(encoding="utf-8"))
     assert payload["targets"][0]["delegation_matches"] is True
     assert payload["targets"][0]["authoritative_checks"][0]["authoritative"] is True
+
+
+def test_restore_ttl_dry_run_writes_restore_changes(tmp_path: Path) -> None:
+    manifest_path = write_manifest(tmp_path)
+    result_path = tmp_path / "reduce-ttl.yaml"
+    result_path.write_text(
+        yaml.safe_dump(
+            {
+                "source_zone": {"name": "xyz.com.", "hosted_zone_id": "Z123", "private_zone": False},
+                "changes": [
+                    {
+                        "record": {"Name": "abc.xyz.com.", "Type": "A", "TTL": 300, "ResourceRecords": [{"Value": "192.0.2.10"}]},
+                        "original_ttl": 3600,
+                    }
+                ],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "restore-ttl.yaml"
+    fake_service = FakeRoute53Service()
+    args = SimpleNamespace(manifest=str(manifest_path), result=str(result_path), output=str(output_path), apply=False)
+    with patch("route53_delegation.cli.create_route53_service", return_value=fake_service):
+        assert cli.run_restore_ttl(args) == 0
+    payload = yaml.safe_load(output_path.read_text(encoding="utf-8"))
+    assert payload["attempted_change_count"] == 1
+    assert payload["changes"][0]["record"]["TTL"] == 3600
+
+
+def test_undelegate_subdomains_apply_calls_route53(tmp_path: Path) -> None:
+    manifest_path = write_manifest(tmp_path)
+    output_path = tmp_path / "undelegate.yaml"
+    fake_service = FakeRoute53Service()
+    fake_service.list_all_record_sets = lambda hosted_zone_id: [  # type: ignore[method-assign]
+        {"Name": "abc.xyz.com.", "Type": "NS", "TTL": 300, "ResourceRecords": [{"Value": "ns-1.awsdns.com."}]},
+        {"Name": "other.xyz.com.", "Type": "A", "TTL": 3600, "ResourceRecords": [{"Value": "192.0.2.12"}]},
+    ]
+    args = SimpleNamespace(manifest=str(manifest_path), output=str(output_path), apply=True)
+    with patch("route53_delegation.cli.create_route53_service", return_value=fake_service):
+        assert cli.run_undelegate_subdomains(args) == 0
+    payload = yaml.safe_load(output_path.read_text(encoding="utf-8"))
+    assert payload["aws_change_info"]["Status"] == "PENDING"
+    assert payload["changes"][0]["action"] == "DELETE"
+
+
+def test_restore_parent_records_dry_run_writes_upserts(tmp_path: Path) -> None:
+    manifest_path = write_manifest(tmp_path)
+    inventory_path = tmp_path / "inventory.yaml"
+    inventory_path.write_text(
+        yaml.safe_dump(
+            {
+                "source_zone": {"name": "xyz.com.", "hosted_zone_id": "Z123", "private_zone": False},
+                "targets": [
+                    {
+                        "name": "abc.xyz.com.",
+                        "source_records": [
+                            {"Name": "abc.xyz.com.", "Type": "NS", "TTL": 300, "ResourceRecords": [{"Value": "ns-1.awsdns.com."}]},
+                            {"Name": "a.abc.xyz.com.", "Type": "A", "TTL": 3600, "ResourceRecords": [{"Value": "192.0.2.11"}]},
+                        ],
+                    }
+                ],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "restore-parent.yaml"
+    fake_service = FakeRoute53Service()
+    args = SimpleNamespace(manifest=str(manifest_path), inventory=str(inventory_path), output=str(output_path), apply=False)
+    with patch("route53_delegation.cli.create_route53_service", return_value=fake_service):
+        assert cli.run_restore_parent_records(args) == 0
+    payload = yaml.safe_load(output_path.read_text(encoding="utf-8"))
+    assert payload["attempted_change_count"] == 1
+    assert payload["changes"][0]["action"] == "UPSERT"
+    assert payload["skipped_changes"][0]["reason"] == "delegation_record_preserved"

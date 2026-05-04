@@ -314,6 +314,61 @@ def build_parent_cleanup_change_set(
     return changes, skipped
 
 
+def build_restore_ttl_change_set(
+    reduce_ttl_result: dict[str, Any],
+    live_record_lookup: dict[str, dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    changes: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+
+    for change in reduce_ttl_result.get("changes", []):
+        record = change["record"]
+        key = make_record_key(record)
+        live_record = live_record_lookup.get(key)
+        if live_record is None:
+            skipped.append({"record_key": key, "reason": "record_missing_from_live_zone"})
+            continue
+        restored_record = deepcopy(live_record)
+        restored_record["TTL"] = change["original_ttl"]
+        changes.append({"Action": "UPSERT", "ResourceRecordSet": restored_record})
+
+    return changes, skipped
+
+
+def build_undelegation_change_set(
+    manifest: Manifest,
+    live_parent_lookup: dict[str, dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    changes: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+
+    for target in manifest.targets:
+        key = f"{fqdn(target.name)}|NS"
+        live_record = live_parent_lookup.get(key)
+        if live_record is None:
+            skipped.append({"record_key": key, "reason": "delegation_record_missing_from_live_parent_zone"})
+            continue
+        changes.append({"Action": "DELETE", "ResourceRecordSet": deepcopy(live_record)})
+
+    return changes, skipped
+
+
+def build_restore_parent_change_set(inventory_snapshot: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    changes: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+
+    for target_snapshot in inventory_snapshot["targets"]:
+        target_name = target_snapshot["name"]
+        for record in target_snapshot.get("source_records", []):
+            reason = cleanup_parent_skip_reason(record, target_name)
+            if reason is not None:
+                skipped.append({"record_key": make_record_key(record), "reason": reason, "record": summarize_record(record)})
+                continue
+            changes.append({"Action": "UPSERT", "ResourceRecordSet": deepcopy(record)})
+
+    return changes, skipped
+
+
 def zone_file_skip_reason(record: dict[str, Any], target_name: str) -> str | None:
     normalized_name = normalize_dns_name(record["Name"])
     normalized_target = normalize_dns_name(target_name)

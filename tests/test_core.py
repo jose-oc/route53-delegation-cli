@@ -9,8 +9,11 @@ from route53_delegation.core import (
     build_inventory_snapshot,
     build_parent_cleanup_change_set,
     build_record_lookup,
+    build_restore_parent_change_set,
+    build_restore_ttl_change_set,
     build_ttl_change_set,
     build_ttl_plan,
+    build_undelegation_change_set,
     build_zone_file_export,
     normalize_dns_name,
     pick_verification_record,
@@ -216,3 +219,49 @@ def test_pick_verification_record_uses_standard_non_ns_record() -> None:
     record = pick_verification_record(inventory_snapshot, "abc.xyz.com")
     assert record is not None
     assert record["Name"] == "a.abc.xyz.com."
+
+
+def test_restore_ttl_change_set_reinstates_original_ttl() -> None:
+    result_snapshot = {
+        "changes": [
+            {
+                "record": {"Name": "a.abc.xyz.com.", "Type": "A", "TTL": 300, "ResourceRecords": [{"Value": "192.0.2.11"}]},
+                "original_ttl": 3600,
+            }
+        ]
+    }
+    live_lookup = build_record_lookup(
+        [{"Name": "a.abc.xyz.com.", "Type": "A", "TTL": 300, "ResourceRecords": [{"Value": "192.0.2.11"}]}]
+    )
+    changes, skipped = build_restore_ttl_change_set(result_snapshot, live_lookup)
+    assert skipped == []
+    assert changes[0]["ResourceRecordSet"]["TTL"] == 3600
+
+
+def test_build_undelegation_change_set_deletes_live_ns_record() -> None:
+    live_lookup = build_record_lookup(
+        [{"Name": "abc.xyz.com.", "Type": "NS", "TTL": 300, "ResourceRecords": [{"Value": "ns-1.awsdns.com."}]}]
+    )
+    changes, skipped = build_undelegation_change_set(manifest(), live_lookup)
+    assert len(changes) == 1
+    assert changes[0]["Action"] == "DELETE"
+    assert skipped[0]["reason"] == "delegation_record_missing_from_live_parent_zone"
+
+
+def test_build_restore_parent_change_set_restores_non_delegation_records() -> None:
+    inventory_snapshot = {
+        "targets": [
+            {
+                "name": "abc.xyz.com.",
+                "source_records": [
+                    {"Name": "abc.xyz.com.", "Type": "NS", "TTL": 300, "ResourceRecords": [{"Value": "ns-1"}]},
+                    {"Name": "a.abc.xyz.com.", "Type": "A", "TTL": 3600, "ResourceRecords": [{"Value": "192.0.2.11"}]},
+                ],
+            }
+        ]
+    }
+    changes, skipped = build_restore_parent_change_set(inventory_snapshot)
+    assert len(changes) == 1
+    assert changes[0]["Action"] == "UPSERT"
+    assert changes[0]["ResourceRecordSet"]["Name"] == "a.abc.xyz.com."
+    assert skipped[0]["reason"] == "delegation_record_preserved"

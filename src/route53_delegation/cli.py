@@ -14,8 +14,11 @@ from route53_delegation.core import (
     build_inventory_snapshot,
     build_parent_cleanup_change_set,
     build_record_lookup,
+    build_restore_parent_change_set,
+    build_restore_ttl_change_set,
     build_ttl_change_set,
     build_ttl_plan,
+    build_undelegation_change_set,
     build_zone_file_export,
     pick_verification_record,
 )
@@ -83,6 +86,26 @@ def build_parser() -> argparse.ArgumentParser:
     verify_parser.add_argument("--inventory", required=True, help="Path to an inventory YAML file")
     verify_parser.add_argument("--output", help="Path to write the verification YAML file")
     verify_parser.set_defaults(func=run_verify_delegation)
+
+    restore_ttl_parser = subparsers.add_parser("restore-ttl", help="Restore original TTLs from a previous reduce-ttl result artifact")
+    restore_ttl_parser.add_argument("--manifest", required=True, help="Path to the manifest YAML file")
+    restore_ttl_parser.add_argument("--result", required=True, help="Path to a previous reduce-ttl result YAML file")
+    restore_ttl_parser.add_argument("--output", help="Path to write the execution result YAML file")
+    restore_ttl_parser.add_argument("--apply", action="store_true", help="Apply Route 53 changes. Dry-run is the default.")
+    restore_ttl_parser.set_defaults(func=run_restore_ttl)
+
+    undelegate_parser = subparsers.add_parser("undelegate-subdomains", help="Remove parent-zone NS delegations for each target")
+    undelegate_parser.add_argument("--manifest", required=True, help="Path to the manifest YAML file")
+    undelegate_parser.add_argument("--output", help="Path to write the execution result YAML file")
+    undelegate_parser.add_argument("--apply", action="store_true", help="Apply Route 53 changes. Dry-run is the default.")
+    undelegate_parser.set_defaults(func=run_undelegate_subdomains)
+
+    restore_parent_parser = subparsers.add_parser("restore-parent-records", help="Restore migrated records back into the parent zone from inventory")
+    restore_parent_parser.add_argument("--manifest", required=True, help="Path to the manifest YAML file")
+    restore_parent_parser.add_argument("--inventory", required=True, help="Path to an inventory YAML file")
+    restore_parent_parser.add_argument("--output", help="Path to write the execution result YAML file")
+    restore_parent_parser.add_argument("--apply", action="store_true", help="Apply Route 53 changes. Dry-run is the default.")
+    restore_parent_parser.set_defaults(func=run_restore_parent_records)
 
     return parser
 
@@ -365,6 +388,101 @@ def run_verify_delegation(args: argparse.Namespace) -> int:
 
     result = {"schema_version": 1, "targets": results}
     output_path = Path(args.output) if args.output else default_output_path("verify-delegation", manifest.parent_zone.name)
+    dump_yaml_file(output_path, result)
+    print(output_path)
+    return 0
+
+
+def run_restore_ttl(args: argparse.Namespace) -> int:
+    manifest = load_manifest(args.manifest)
+    reduce_ttl_result = load_yaml_file(Path(args.result))
+    service = create_route53_service()
+    zone = service.resolve_public_hosted_zone(
+        zone_name=manifest.parent_zone.name,
+        hosted_zone_id=manifest.parent_zone.hosted_zone_id,
+    )
+    live_records = service.list_all_record_sets(zone["id"])
+    record_lookup = build_record_lookup(live_records)
+    changes, skipped = build_restore_ttl_change_set(reduce_ttl_result, record_lookup)
+
+    result: dict[str, Any] = {
+        "schema_version": 1,
+        "source_zone": reduce_ttl_result.get("source_zone", {"name": zone["name"], "hosted_zone_id": zone["id"], "private_zone": zone["private_zone"]}),
+        "mode": "apply" if args.apply else "dry-run",
+        "attempted_change_count": len(changes),
+        "skipped_changes": skipped,
+        "changes": [{"action": change["Action"], "record": change["ResourceRecordSet"]} for change in changes],
+    }
+    if args.apply and changes:
+        aws_response = service.apply_change_batch(zone["id"], changes)
+        result["aws_change_info"] = aws_response["ChangeInfo"]
+
+    output_path = Path(args.output) if args.output else default_output_path("restore-ttl", manifest.parent_zone.name)
+    dump_yaml_file(output_path, result)
+    print(output_path)
+    return 0
+
+
+def run_undelegate_subdomains(args: argparse.Namespace) -> int:
+    manifest = load_manifest(args.manifest)
+    service = create_route53_service()
+    parent_zone = service.resolve_public_hosted_zone(
+        zone_name=manifest.parent_zone.name,
+        hosted_zone_id=manifest.parent_zone.hosted_zone_id,
+    )
+    live_records = service.list_all_record_sets(parent_zone["id"])
+    record_lookup = build_record_lookup(live_records)
+    changes, skipped = build_undelegation_change_set(manifest, record_lookup)
+
+    result: dict[str, Any] = {
+        "schema_version": 1,
+        "source_zone": {
+            "name": parent_zone["name"],
+            "hosted_zone_id": parent_zone["id"],
+            "private_zone": parent_zone["private_zone"],
+        },
+        "mode": "apply" if args.apply else "dry-run",
+        "attempted_change_count": len(changes),
+        "skipped_changes": skipped,
+        "changes": [{"action": change["Action"], "record": change["ResourceRecordSet"]} for change in changes],
+    }
+    if args.apply and changes:
+        aws_response = service.apply_change_batch(parent_zone["id"], changes)
+        result["aws_change_info"] = aws_response["ChangeInfo"]
+
+    output_path = Path(args.output) if args.output else default_output_path("undelegate-subdomains", manifest.parent_zone.name)
+    dump_yaml_file(output_path, result)
+    print(output_path)
+    return 0
+
+
+def run_restore_parent_records(args: argparse.Namespace) -> int:
+    manifest = load_manifest(args.manifest)
+    inventory_snapshot = load_yaml_file(Path(args.inventory))
+    service = create_route53_service()
+    parent_zone = service.resolve_public_hosted_zone(
+        zone_name=manifest.parent_zone.name,
+        hosted_zone_id=manifest.parent_zone.hosted_zone_id,
+    )
+    changes, skipped = build_restore_parent_change_set(inventory_snapshot)
+
+    result: dict[str, Any] = {
+        "schema_version": 1,
+        "source_zone": {
+            "name": parent_zone["name"],
+            "hosted_zone_id": parent_zone["id"],
+            "private_zone": parent_zone["private_zone"],
+        },
+        "mode": "apply" if args.apply else "dry-run",
+        "attempted_change_count": len(changes),
+        "skipped_changes": skipped,
+        "changes": [{"action": change["Action"], "record": change["ResourceRecordSet"]} for change in changes],
+    }
+    if args.apply and changes:
+        aws_response = service.apply_change_batch(parent_zone["id"], changes)
+        result["aws_change_info"] = aws_response["ChangeInfo"]
+
+    output_path = Path(args.output) if args.output else default_output_path("restore-parent-records", manifest.parent_zone.name)
     dump_yaml_file(output_path, result)
     print(output_path)
     return 0
