@@ -1,0 +1,27 @@
+[project]
+name = "route53-delegation-cli"
+version = "0.1.0"
+description = "CLI helpers for preparing Route 53 subdomain delegation"
+readme = "route53-delegation-cli-plan.md"
+requires-python = ">=3.11"
+dependencies = [
+  "boto3>=1.35.0",
+  "PyYAML>=6.0.2",
+  "pytest>=8.3.0",
+]
+
+[project.scripts]
+route53-delegation = "route53_delegation.cli:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

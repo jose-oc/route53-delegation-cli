@@ -1,0 +1,283 @@
+from __future__ import annotations
+
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import yaml
+
+from route53_delegation import cli
+
+
+MANIFEST = """
+parent_zone:
+  name: xyz.com
+  hosted_zone_id: Z123
+targets:
+  - name: abc.xyz.com
+    pre_cutover_ttl: 300
+"""
+
+
+class FakeRoute53Service:
+    def __init__(self) -> None:
+        self.applied_batches = []
+        self.created_zones = []
+
+    def resolve_public_hosted_zone(self, zone_name: str, hosted_zone_id: str | None = None) -> dict[str, object]:
+        if zone_name == "abc.xyz.com":
+            return {"id": "ZCHILD1", "name": "abc.xyz.com.", "private_zone": False}
+        return {"id": hosted_zone_id or "Z123", "name": f"{zone_name}.", "private_zone": False}
+
+    def find_public_hosted_zone(self, zone_name: str) -> dict[str, object] | None:
+        if zone_name == "abc.xyz.com":
+            return {"id": "ZCHILD1", "name": "abc.xyz.com.", "private_zone": False}
+        return None
+
+    def get_hosted_zone_details(self, hosted_zone_id: str) -> dict[str, object]:
+        if hosted_zone_id == "ZCHILD1":
+            return {
+                "id": "ZCHILD1",
+                "name": "abc.xyz.com.",
+                "private_zone": False,
+                "name_servers": ["ns-1.awsdns.com", "ns-2.awsdns.net"],
+            }
+        return {
+            "id": hosted_zone_id,
+            "name": "xyz.com.",
+            "private_zone": False,
+            "name_servers": [],
+        }
+
+    def create_public_hosted_zone(self, zone_name: str, caller_reference: str, comment: str | None = None) -> dict[str, object]:
+        self.created_zones.append((zone_name, caller_reference, comment))
+        return {
+            "id": "ZNEW1",
+            "name": f"{zone_name}.",
+            "private_zone": False,
+            "name_servers": ["ns-11.awsdns.com", "ns-22.awsdns.net"],
+        }
+
+    def list_all_record_sets(self, hosted_zone_id: str) -> list[dict[str, object]]:
+        if hosted_zone_id == "ZCHILD1":
+            return [
+                {"Name": "abc.xyz.com.", "Type": "NS", "TTL": 300, "ResourceRecords": [{"Value": "ns-1.awsdns.com."}]},
+                {"Name": "abc.xyz.com.", "Type": "SOA", "TTL": 900, "ResourceRecords": [{"Value": "ns-1.awsdns.com. hostmaster.awsdns.com. 1 7200 900 1209600 86400"}]},
+            ]
+        return [
+            {"Name": "abc.xyz.com.", "Type": "A", "TTL": 3600, "ResourceRecords": [{"Value": "192.0.2.10"}]},
+            {"Name": "a.abc.xyz.com.", "Type": "A", "TTL": 3600, "ResourceRecords": [{"Value": "192.0.2.11"}]},
+            {"Name": "other.xyz.com.", "Type": "A", "TTL": 3600, "ResourceRecords": [{"Value": "192.0.2.12"}]},
+        ]
+
+    def apply_change_batch(self, hosted_zone_id: str, changes: list[dict[str, object]]) -> dict[str, object]:
+        self.applied_batches.append((hosted_zone_id, changes))
+        return {"ChangeInfo": {"Id": "C123", "Status": "PENDING"}}
+
+
+def write_manifest(tmp_path: Path) -> Path:
+    path = tmp_path / "manifest.yaml"
+    path.write_text(MANIFEST, encoding="utf-8")
+    return path
+
+
+def test_inventory_command_writes_yaml_snapshot(tmp_path: Path) -> None:
+    manifest_path = write_manifest(tmp_path)
+    output_path = tmp_path / "inventory.yaml"
+    fake_service = FakeRoute53Service()
+    args = SimpleNamespace(manifest=str(manifest_path), output=str(output_path))
+    with patch("route53_delegation.cli.create_route53_service", return_value=fake_service):
+        assert cli.run_inventory(args) == 0
+    payload = yaml.safe_load(output_path.read_text(encoding="utf-8"))
+    assert payload["source_zone"]["hosted_zone_id"] == "Z123"
+    assert payload["targets"][0]["matched_record_count"] == 2
+
+
+def test_plan_command_uses_inventory_file(tmp_path: Path) -> None:
+    manifest_path = write_manifest(tmp_path)
+    inventory_path = tmp_path / "inventory.yaml"
+    inventory_path.write_text(
+        yaml.safe_dump(
+            {
+                "source_zone": {"name": "xyz.com.", "hosted_zone_id": "Z123", "private_zone": False},
+                "targets": [
+                    {
+                        "name": "abc.xyz.com.",
+                        "pre_cutover_ttl": 300,
+                        "source_records": [
+                            {"Name": "a.abc.xyz.com.", "Type": "A", "TTL": 3600, "ResourceRecords": [{"Value": "192.0.2.11"}]}
+                        ],
+                        "records": [
+                            {"name": "a.abc.xyz.com.", "type": "A", "ttl": 3600, "resource_records": ["192.0.2.11"]}
+                        ],
+                    }
+                ],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "plan.yaml"
+    args = SimpleNamespace(manifest=str(manifest_path), inventory=str(inventory_path), output=str(output_path))
+    assert cli.run_plan(args) == 0
+    payload = yaml.safe_load(output_path.read_text(encoding="utf-8"))
+    assert payload["summary"]["eligible_ttl_update_count"] == 1
+
+
+def test_reduce_ttl_dry_run_writes_changes_without_applying(tmp_path: Path) -> None:
+    manifest_path = write_manifest(tmp_path)
+    plan_path = tmp_path / "plan.yaml"
+    plan_path.write_text(
+        yaml.safe_dump(
+            {
+                "source_zone": {"name": "xyz.com.", "hosted_zone_id": "Z123", "private_zone": False},
+                "targets": [
+                    {
+                        "name": "abc.xyz.com.",
+                        "eligible_ttl_updates": [
+                            {
+                                "record_key": "abc.xyz.com.|A",
+                                "target_ttl": 300,
+                            }
+                        ],
+                    }
+                ],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "result.yaml"
+    fake_service = FakeRoute53Service()
+    args = SimpleNamespace(manifest=str(manifest_path), plan=str(plan_path), output=str(output_path), apply=False)
+    with patch("route53_delegation.cli.create_route53_service", return_value=fake_service):
+        assert cli.run_reduce_ttl(args) == 0
+    payload = yaml.safe_load(output_path.read_text(encoding="utf-8"))
+    assert payload["mode"] == "dry-run"
+    assert payload["attempted_change_count"] == 1
+    assert fake_service.applied_batches == []
+
+
+def test_reduce_ttl_apply_calls_route53(tmp_path: Path) -> None:
+    manifest_path = write_manifest(tmp_path)
+    plan_path = tmp_path / "plan.yaml"
+    plan_path.write_text(
+        yaml.safe_dump(
+            {
+                "source_zone": {"name": "xyz.com.", "hosted_zone_id": "Z123", "private_zone": False},
+                "targets": [
+                    {
+                        "name": "abc.xyz.com.",
+                        "eligible_ttl_updates": [
+                            {
+                                "record_key": "a.abc.xyz.com.|A",
+                                "target_ttl": 300,
+                            }
+                        ],
+                    }
+                ],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "result.yaml"
+    fake_service = FakeRoute53Service()
+    args = SimpleNamespace(manifest=str(manifest_path), plan=str(plan_path), output=str(output_path), apply=True)
+    with patch("route53_delegation.cli.create_route53_service", return_value=fake_service):
+        assert cli.run_reduce_ttl(args) == 0
+    payload = yaml.safe_load(output_path.read_text(encoding="utf-8"))
+    assert payload["mode"] == "apply"
+    assert payload["aws_change_info"]["Status"] == "PENDING"
+    assert len(fake_service.applied_batches) == 1
+
+
+def test_create_child_zones_dry_run_reports_existing_zone(tmp_path: Path) -> None:
+    manifest_path = write_manifest(tmp_path)
+    output_path = tmp_path / "create-child-zones.yaml"
+    fake_service = FakeRoute53Service()
+    args = SimpleNamespace(manifest=str(manifest_path), output=str(output_path), apply=False)
+    with patch("route53_delegation.cli.create_route53_service", return_value=fake_service):
+        assert cli.run_create_child_zones(args) == 0
+    payload = yaml.safe_load(output_path.read_text(encoding="utf-8"))
+    assert payload["targets"][0]["action"] == "exists"
+    assert payload["targets"][0]["hosted_zone_id"] == "ZCHILD1"
+
+
+def test_populate_child_zones_dry_run_writes_upserts(tmp_path: Path) -> None:
+    manifest_path = write_manifest(tmp_path)
+    inventory_path = tmp_path / "inventory.yaml"
+    inventory_path.write_text(
+        yaml.safe_dump(
+            {
+                "source_zone": {"name": "xyz.com.", "hosted_zone_id": "Z123", "private_zone": False},
+                "targets": [
+                    {
+                        "name": "abc.xyz.com.",
+                        "pre_cutover_ttl": 300,
+                        "source_records": [
+                            {"Name": "abc.xyz.com.", "Type": "NS", "TTL": 300, "ResourceRecords": [{"Value": "ns-1.awsdns.com."}]},
+                            {"Name": "a.abc.xyz.com.", "Type": "A", "TTL": 300, "ResourceRecords": [{"Value": "192.0.2.11"}]},
+                        ],
+                        "records": [],
+                    }
+                ],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "populate.yaml"
+    fake_service = FakeRoute53Service()
+    args = SimpleNamespace(manifest=str(manifest_path), inventory=str(inventory_path), output=str(output_path), apply=False)
+    with patch("route53_delegation.cli.create_route53_service", return_value=fake_service):
+        assert cli.run_populate_child_zones(args) == 0
+    payload = yaml.safe_load(output_path.read_text(encoding="utf-8"))
+    assert payload["targets"][0]["attempted_change_count"] == 1
+    assert payload["targets"][0]["skipped_changes"][0]["reason"] == "child_zone_apex_managed_by_route53"
+
+
+def test_delegate_subdomains_apply_calls_parent_zone(tmp_path: Path) -> None:
+    manifest_path = write_manifest(tmp_path)
+    output_path = tmp_path / "delegate.yaml"
+    fake_service = FakeRoute53Service()
+    args = SimpleNamespace(manifest=str(manifest_path), output=str(output_path), apply=True)
+    with patch("route53_delegation.cli.create_route53_service", return_value=fake_service):
+        assert cli.run_delegate_subdomains(args) == 0
+    payload = yaml.safe_load(output_path.read_text(encoding="utf-8"))
+    assert payload["attempted_change_count"] == 1
+    assert payload["aws_change_info"]["Status"] == "PENDING"
+    assert fake_service.applied_batches[0][0] == "Z123"
+
+
+def test_cleanup_parent_dry_run_skips_delegation_record(tmp_path: Path) -> None:
+    manifest_path = write_manifest(tmp_path)
+    inventory_path = tmp_path / "inventory.yaml"
+    inventory_path.write_text(
+        yaml.safe_dump(
+            {
+                "source_zone": {"name": "xyz.com.", "hosted_zone_id": "Z123", "private_zone": False},
+                "targets": [
+                    {
+                        "name": "abc.xyz.com.",
+                        "pre_cutover_ttl": 300,
+                        "source_records": [
+                            {"Name": "abc.xyz.com.", "Type": "NS", "TTL": 300, "ResourceRecords": [{"Value": "ns-1.awsdns.com."}]},
+                            {"Name": "a.abc.xyz.com.", "Type": "A", "TTL": 3600, "ResourceRecords": [{"Value": "192.0.2.11"}]},
+                        ],
+                        "records": [],
+                    }
+                ],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "cleanup.yaml"
+    fake_service = FakeRoute53Service()
+    args = SimpleNamespace(manifest=str(manifest_path), inventory=str(inventory_path), output=str(output_path), apply=False)
+    with patch("route53_delegation.cli.create_route53_service", return_value=fake_service):
+        assert cli.run_cleanup_parent(args) == 0
+    payload = yaml.safe_load(output_path.read_text(encoding="utf-8"))
+    assert payload["attempted_change_count"] == 1
+    assert payload["skipped_changes"][0]["reason"] == "delegation_record_preserved"

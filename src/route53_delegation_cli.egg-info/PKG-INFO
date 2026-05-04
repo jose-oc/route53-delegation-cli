@@ -1,0 +1,143 @@
+Metadata-Version: 2.4
+Name: route53-delegation-cli
+Version: 0.1.0
+Summary: CLI helpers for preparing Route 53 subdomain delegation
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: boto3>=1.35.0
+Requires-Dist: PyYAML>=6.0.2
+Requires-Dist: pytest>=8.3.0
+
+# Route 53 Subdomain Delegation CLI v1
+
+## Summary
+
+Build a Python CLI for selectively preparing Route 53 subdomain delegation from a large parent public hosted zone. The first version is manifest-driven, uses live AWS Route 53 as the source of truth, persists human-readable YAML artifacts locally, and covers the first three operator phases:
+
+1. inventory the parent zone and extract records for selected subdomains
+2. generate a reviewable migration plan
+3. reduce TTLs only for eligible records in those selected subdomains
+
+The CLI is safe by default: mutating commands produce a dry-run preview unless an explicit apply flag is provided.
+
+## Implementation Changes
+
+- Create a small Python package in this workspace with a single CLI entrypoint and three subcommands:
+  - `inventory`
+  - `plan`
+  - `reduce-ttl`
+- Use a manifest-first workflow. The operator provides a YAML manifest containing:
+  - parent zone name
+  - optional parent zone ID override
+  - target subdomains
+  - per-target pre-cutover TTL
+- Resolve the parent hosted zone from AWS if the manifest omits the hosted zone ID. Restrict v1 to Route 53 public hosted zones only.
+- For `inventory`:
+  - read all records from the parent zone using paginated `ListResourceRecordSets`
+  - normalize record names to comparable FQDN form
+  - select only records at or below each target subdomain
+  - emit a YAML snapshot with:
+    - source zone metadata
+    - selected targets
+    - matched records
+    - flagged records needing extra attention
+  - flag, but do not fail on, records that are operationally sensitive:
+    - apex records at the child zone name
+    - `NS` and `SOA`
+    - alias records
+    - routing-policy records with set identifiers
+    - health-check-linked records
+- For `plan`:
+  - consume the manifest plus live AWS state or the freshly generated inventory artifact
+  - produce a YAML plan per target subdomain listing:
+    - records eligible for TTL reduction
+    - records skipped from TTL reduction with reason
+    - later migration actions that are out of scope for v1 but shown for operator context
+  - explicitly exclude delegation execution steps from v1 implementation, but include them as future phases in the plan output
+- For `reduce-ttl`:
+  - operate only on records marked eligible in the plan
+  - support `--dry-run` by default and `--apply` for execution
+  - generate exact Route 53 `ChangeResourceRecordSets` batches
+  - update only records whose current TTL differs from the target pre-cutover TTL
+  - skip records that cannot or should not be TTL-adjusted in v1, with a clear reason in output
+  - persist a YAML result artifact recording:
+    - attempted changes
+    - applied changes
+    - skipped records
+    - original TTLs for future restoration
+- Use `argparse` for a minimal dependency footprint.
+- Use `boto3` for AWS integration and standard AWS credential resolution from the environment or configured profile.
+- Keep artifacts in a dedicated local folder such as `artifacts/`, with stable filenames that include the parent zone and timestamp.
+
+## Public Interfaces and File Shapes
+
+- Add a manifest file format:
+
+```yaml
+parent_zone:
+  name: xyz.com
+  hosted_zone_id: Z1234567890
+targets:
+  - name: abc.xyz.com
+    pre_cutover_ttl: 300
+  - name: def.xyz.com
+    pre_cutover_ttl: 300
+```
+
+- CLI contract:
+  - `route53-delegation inventory --manifest <path> --output <path>`
+  - `route53-delegation plan --manifest <path> --inventory <path> --output <path>`
+  - `route53-delegation reduce-ttl --manifest <path> --plan <path> [--apply] [--output <path>]`
+- Inventory artifact:
+  - zone metadata
+  - target list
+  - normalized matched records
+  - flagged records with reason codes
+- Plan artifact:
+  - per-target eligible TTL updates
+  - per-target skipped records
+  - summary counts
+  - future migration placeholders for child-zone creation, delegation, and parent cleanup
+- Result artifact for TTL reduction:
+  - dry-run/apply mode
+  - exact intended or applied changes
+  - original TTL map for rollback/restoration planning
+
+## Test Plan
+
+- Unit tests for record selection:
+  - match apex child records such as `abc.xyz.com`
+  - match deeper descendants such as `a.abc.xyz.com`
+  - exclude sibling namespaces such as `abc2.xyz.com`
+- Unit tests for normalization:
+  - trailing-dot and case normalization
+  - duplicate-looking names normalized consistently
+- Unit tests for eligibility:
+  - plain records with TTL are eligible
+  - alias records are skipped with reason
+  - `NS` and `SOA` are skipped with reason unless explicitly allowed later
+  - routing-policy records preserve identifying fields in snapshots
+- Unit tests for plan generation:
+  - multiple targets in one parent zone
+  - empty target result sets
+  - already-correct TTLs omitted from apply list
+- Integration-style tests with mocked Route 53 responses:
+  - paginated record listing
+  - hosted zone lookup by name
+  - change batch generation for TTL updates
+  - dry-run output matches apply payload
+- Acceptance scenarios:
+  - large parent zone with only selected subdomains included
+  - manifest with explicit zone ID
+  - manifest relying on zone-name lookup
+  - mixed eligible and skipped records in a single target subtree
+
+## Assumptions and Defaults
+
+- v1 supports Route 53 public hosted zones only.
+- v1 is manifest-driven and does not include interactive target discovery.
+- Live AWS Route 53 is the source of truth for all three initial steps.
+- YAML is the persisted format for manifest, inventory, plan, and result artifacts.
+- Mutating operations are dry-run by default and require an explicit apply flag.
+- Each target subdomain has a single `pre_cutover_ttl` applied to all eligible records in that subtree.
+- The implementation does not yet create child zones, delegate `NS` records, or delete parent records; it prepares those later phases by producing accurate inventory and plans.
