@@ -1,2 +1,0 @@
-[console_scripts]
-route53-delegation = route53_delegation.cli:main

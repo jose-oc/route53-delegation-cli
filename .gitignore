@@ -1,1 +1,9 @@
+*.egg-info/
+dist/
+build/
+.venv/
+.uv-cache/
+__pycache__/
+.pytest_cache/
+
 artifacts/
