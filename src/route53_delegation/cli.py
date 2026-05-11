@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,7 @@ import boto3
 from route53_delegation.aws import Route53Service
 from route53_delegation.core import (
     build_child_zone_change_set,
+    chunk_changes,
     build_delegation_change_set,
     build_inventory_snapshot,
     build_parent_cleanup_change_set,
@@ -169,8 +171,7 @@ def run_reduce_ttl(args: argparse.Namespace) -> int:
     }
 
     if args.apply and changes:
-        aws_response = service.apply_change_batch(zone["id"], changes)
-        result["aws_change_info"] = aws_response["ChangeInfo"]
+        result["aws_change_info"] = _apply_changes_in_batches(service, zone["id"], changes)
 
     output_path = Path(args.output) if args.output else default_output_path("reduce-ttl", manifest.parent_zone.name)
     dump_yaml_file(output_path, result)
@@ -239,8 +240,7 @@ def run_populate_child_zones(args: argparse.Namespace) -> int:
             "changes": [{"action": change["Action"], "record": change["ResourceRecordSet"]} for change in changes],
         }
         if args.apply and changes:
-            aws_response = service.apply_change_batch(child_zone["id"], changes)
-            target_result["aws_change_info"] = aws_response["ChangeInfo"]
+            target_result["aws_change_info"] = _apply_changes_in_batches(service, child_zone["id"], changes)
         targets_output.append(target_result)
 
     result = {
@@ -279,8 +279,7 @@ def run_delegate_subdomains(args: argparse.Namespace) -> int:
         "changes": [{"action": change["Action"], "record": change["ResourceRecordSet"]} for change in changes],
     }
     if args.apply and changes:
-        aws_response = service.apply_change_batch(parent_zone["id"], changes)
-        result["aws_change_info"] = aws_response["ChangeInfo"]
+        result["aws_change_info"] = _apply_changes_in_batches(service, parent_zone["id"], changes)
 
     output_path = Path(args.output) if args.output else default_output_path("delegate-subdomains", manifest.parent_zone.name)
     dump_yaml_file(output_path, result)
@@ -313,8 +312,7 @@ def run_cleanup_parent(args: argparse.Namespace) -> int:
         "changes": [{"action": change["Action"], "record": change["ResourceRecordSet"]} for change in changes],
     }
     if args.apply and changes:
-        aws_response = service.apply_change_batch(parent_zone["id"], changes)
-        result["aws_change_info"] = aws_response["ChangeInfo"]
+        result["aws_change_info"] = _apply_changes_in_batches(service, parent_zone["id"], changes)
 
     output_path = Path(args.output) if args.output else default_output_path("cleanup-parent", manifest.parent_zone.name)
     dump_yaml_file(output_path, result)
@@ -414,8 +412,7 @@ def run_restore_ttl(args: argparse.Namespace) -> int:
         "changes": [{"action": change["Action"], "record": change["ResourceRecordSet"]} for change in changes],
     }
     if args.apply and changes:
-        aws_response = service.apply_change_batch(zone["id"], changes)
-        result["aws_change_info"] = aws_response["ChangeInfo"]
+        result["aws_change_info"] = _apply_changes_in_batches(service, zone["id"], changes)
 
     output_path = Path(args.output) if args.output else default_output_path("restore-ttl", manifest.parent_zone.name)
     dump_yaml_file(output_path, result)
@@ -447,8 +444,7 @@ def run_undelegate_subdomains(args: argparse.Namespace) -> int:
         "changes": [{"action": change["Action"], "record": change["ResourceRecordSet"]} for change in changes],
     }
     if args.apply and changes:
-        aws_response = service.apply_change_batch(parent_zone["id"], changes)
-        result["aws_change_info"] = aws_response["ChangeInfo"]
+        result["aws_change_info"] = _apply_changes_in_batches(service, parent_zone["id"], changes)
 
     output_path = Path(args.output) if args.output else default_output_path("undelegate-subdomains", manifest.parent_zone.name)
     dump_yaml_file(output_path, result)
@@ -479,8 +475,7 @@ def run_restore_parent_records(args: argparse.Namespace) -> int:
         "changes": [{"action": change["Action"], "record": change["ResourceRecordSet"]} for change in changes],
     }
     if args.apply and changes:
-        aws_response = service.apply_change_batch(parent_zone["id"], changes)
-        result["aws_change_info"] = aws_response["ChangeInfo"]
+        result["aws_change_info"] = _apply_changes_in_batches(service, parent_zone["id"], changes)
 
     output_path = Path(args.output) if args.output else default_output_path("restore-parent-records", manifest.parent_zone.name)
     dump_yaml_file(output_path, result)
@@ -542,10 +537,32 @@ def _summarize_sample_record(record: dict[str, Any] | None) -> dict[str, Any] | 
     }
 
 
+def _apply_changes_in_batches(service: Route53Service, hosted_zone_id: str, changes: list[dict[str, Any]]) -> dict[str, Any]:
+    batches = chunk_changes(changes)
+    batch_results: list[dict[str, Any]] = []
+    for index, batch in enumerate(batches, start=1):
+        response = service.apply_change_batch(hosted_zone_id, batch)
+        batch_results.append(
+            {
+                "batch_number": index,
+                "change_count": len(batch),
+                "change_info": response["ChangeInfo"],
+            }
+        )
+    return {
+        "batch_count": len(batch_results),
+        "batches": batch_results,
+    }
+
+
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
-    return args.func(args)
+    try:
+        return args.func(args)
+    except (FileNotFoundError, ValueError, RuntimeError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

@@ -239,6 +239,8 @@ def child_zone_record_skip_reason(record: dict[str, Any], target_name: str) -> s
     normalized_target = normalize_dns_name(target_name)
     if normalized_name == normalized_target and record["Type"] in {"NS", "SOA"}:
         return "child_zone_apex_managed_by_route53"
+    if normalized_name == normalized_target and record["Type"] == "CNAME":
+        return "apex_cname_not_permitted_in_child_zone"
     return None
 
 
@@ -415,3 +417,9 @@ def pick_verification_record(inventory_snapshot: dict[str, Any], target_name: st
             continue
         return deepcopy(record)
     return None
+
+
+def chunk_changes(changes: list[dict[str, Any]], chunk_size: int = 900) -> list[list[dict[str, Any]]]:
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+    return [changes[index : index + chunk_size] for index in range(0, len(changes), chunk_size)]

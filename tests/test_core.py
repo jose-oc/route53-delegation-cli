@@ -142,6 +142,27 @@ def test_child_zone_change_set_skips_route53_managed_apex_ns() -> None:
     assert skipped[0]["reason"] == "child_zone_apex_managed_by_route53"
 
 
+def test_child_zone_change_set_skips_apex_cname() -> None:
+    inventory_snapshot = {
+        "targets": [
+            {
+                "name": "illuminate.nepgroup.io.",
+                "source_records": [
+                    {
+                        "Name": "illuminate.nepgroup.io.",
+                        "Type": "CNAME",
+                        "TTL": 300,
+                        "ResourceRecords": [{"Value": "some-target.example.net."}],
+                    }
+                ],
+            }
+        ]
+    }
+    changes, skipped = build_child_zone_change_set(inventory_snapshot, "illuminate.nepgroup.io")
+    assert changes == []
+    assert skipped[0]["reason"] == "apex_cname_not_permitted_in_child_zone"
+
+
 def test_build_delegation_change_set_uses_child_zone_name_servers() -> None:
     changes = build_delegation_change_set(
         manifest(),
@@ -219,6 +240,14 @@ def test_pick_verification_record_uses_standard_non_ns_record() -> None:
     record = pick_verification_record(inventory_snapshot, "abc.xyz.com")
     assert record is not None
     assert record["Name"] == "a.abc.xyz.com."
+
+
+def test_chunk_changes_splits_large_change_sets() -> None:
+    from route53_delegation.core import chunk_changes
+
+    changes = [{"Action": "UPSERT", "ResourceRecordSet": {"Name": f"r{index}.example.com.", "Type": "A"}} for index in range(1801)]
+    batches = chunk_changes(changes, chunk_size=900)
+    assert [len(batch) for batch in batches] == [900, 900, 1]
 
 
 def test_restore_ttl_change_set_reinstates_original_ttl() -> None:

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from botocore.exceptions import ClientError
+
 
 class Route53Service:
     def __init__(self, client: Any) -> None:
@@ -78,7 +80,13 @@ class Route53Service:
         }
 
     def apply_change_batch(self, hosted_zone_id: str, changes: list[dict[str, Any]]) -> dict[str, Any]:
-        return self.client.change_resource_record_sets(
-            HostedZoneId=hosted_zone_id,
-            ChangeBatch={"Changes": changes},
-        )
+        try:
+            return self.client.change_resource_record_sets(
+                HostedZoneId=hosted_zone_id,
+                ChangeBatch={"Changes": changes},
+            )
+        except ClientError as exc:
+            message = exc.response.get("Error", {}).get("Message", str(exc))
+            raise RuntimeError(
+                f"Route 53 rejected a change batch for hosted zone {hosted_zone_id}: {message}"
+            ) from exc

@@ -188,7 +188,8 @@ def test_reduce_ttl_apply_calls_route53(tmp_path: Path) -> None:
         assert cli.run_reduce_ttl(args) == 0
     payload = yaml.safe_load(output_path.read_text(encoding="utf-8"))
     assert payload["mode"] == "apply"
-    assert payload["aws_change_info"]["Status"] == "PENDING"
+    assert payload["aws_change_info"]["batch_count"] == 1
+    assert payload["aws_change_info"]["batches"][0]["change_info"]["Status"] == "PENDING"
     assert len(fake_service.applied_batches) == 1
 
 
@@ -237,6 +238,43 @@ def test_populate_child_zones_dry_run_writes_upserts(tmp_path: Path) -> None:
     assert payload["targets"][0]["skipped_changes"][0]["reason"] == "child_zone_apex_managed_by_route53"
 
 
+def test_populate_child_zones_dry_run_skips_apex_cname(tmp_path: Path) -> None:
+    manifest_path = write_manifest(tmp_path)
+    inventory_path = tmp_path / "inventory.yaml"
+    inventory_path.write_text(
+        yaml.safe_dump(
+            {
+                "source_zone": {"name": "xyz.com.", "hosted_zone_id": "Z123", "private_zone": False},
+                "targets": [
+                    {
+                        "name": "abc.xyz.com.",
+                        "pre_cutover_ttl": 300,
+                        "source_records": [
+                            {
+                                "Name": "abc.xyz.com.",
+                                "Type": "CNAME",
+                                "TTL": 300,
+                                "ResourceRecords": [{"Value": "target.example.net."}],
+                            }
+                        ],
+                        "records": [],
+                    }
+                ],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "populate-cname.yaml"
+    fake_service = FakeRoute53Service()
+    args = SimpleNamespace(manifest=str(manifest_path), inventory=str(inventory_path), output=str(output_path), apply=False)
+    with patch("route53_delegation.cli.create_route53_service", return_value=fake_service):
+        assert cli.run_populate_child_zones(args) == 0
+    payload = yaml.safe_load(output_path.read_text(encoding="utf-8"))
+    assert payload["targets"][0]["attempted_change_count"] == 0
+    assert payload["targets"][0]["skipped_changes"][0]["reason"] == "apex_cname_not_permitted_in_child_zone"
+
+
 def test_delegate_subdomains_apply_calls_parent_zone(tmp_path: Path) -> None:
     manifest_path = write_manifest(tmp_path)
     output_path = tmp_path / "delegate.yaml"
@@ -246,7 +284,7 @@ def test_delegate_subdomains_apply_calls_parent_zone(tmp_path: Path) -> None:
         assert cli.run_delegate_subdomains(args) == 0
     payload = yaml.safe_load(output_path.read_text(encoding="utf-8"))
     assert payload["attempted_change_count"] == 1
-    assert payload["aws_change_info"]["Status"] == "PENDING"
+    assert payload["aws_change_info"]["batch_count"] == 1
     assert fake_service.applied_batches[0][0] == "Z123"
 
 
@@ -391,8 +429,36 @@ def test_undelegate_subdomains_apply_calls_route53(tmp_path: Path) -> None:
     with patch("route53_delegation.cli.create_route53_service", return_value=fake_service):
         assert cli.run_undelegate_subdomains(args) == 0
     payload = yaml.safe_load(output_path.read_text(encoding="utf-8"))
-    assert payload["aws_change_info"]["Status"] == "PENDING"
+    assert payload["aws_change_info"]["batch_count"] == 1
     assert payload["changes"][0]["action"] == "DELETE"
+
+
+def test_cleanup_parent_apply_batches_large_change_sets(tmp_path: Path) -> None:
+    manifest_path = write_manifest(tmp_path)
+    inventory_path = tmp_path / "inventory.yaml"
+    source_records = [
+        {"Name": f"r{index}.abc.xyz.com.", "Type": "A", "TTL": 300, "ResourceRecords": [{"Value": "192.0.2.11"}]}
+        for index in range(1200)
+    ]
+    inventory_path.write_text(
+        yaml.safe_dump(
+            {
+                "source_zone": {"name": "xyz.com.", "hosted_zone_id": "Z123", "private_zone": False},
+                "targets": [{"name": "abc.xyz.com.", "source_records": source_records}],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "cleanup-batched.yaml"
+    fake_service = FakeRoute53Service()
+    fake_service.list_all_record_sets = lambda hosted_zone_id: source_records  # type: ignore[method-assign]
+    args = SimpleNamespace(manifest=str(manifest_path), inventory=str(inventory_path), output=str(output_path), apply=True)
+    with patch("route53_delegation.cli.create_route53_service", return_value=fake_service):
+        assert cli.run_cleanup_parent(args) == 0
+    payload = yaml.safe_load(output_path.read_text(encoding="utf-8"))
+    assert payload["aws_change_info"]["batch_count"] == 2
+    assert [len(batch[1]) for batch in fake_service.applied_batches] == [900, 300]
 
 
 def test_restore_parent_records_dry_run_writes_upserts(tmp_path: Path) -> None:

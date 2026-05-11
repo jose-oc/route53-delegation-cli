@@ -12,6 +12,8 @@ def ensure_parent_dir(path: Path) -> None:
 
 
 def load_yaml_file(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        raise FileNotFoundError(f"Input file not found: {path}")
     with path.open("r", encoding="utf-8") as handle:
         data = yaml.safe_load(handle)
     if not isinstance(data, dict):
@@ -32,4 +34,3 @@ def utc_timestamp() -> str:
 def default_output_path(kind: str, zone_name: str) -> Path:
     slug = zone_name.rstrip(".").replace(".", "-")
     return Path("artifacts") / f"{slug}-{kind}-{utc_timestamp()}.yaml"
-
