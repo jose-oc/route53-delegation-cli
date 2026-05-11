@@ -243,7 +243,7 @@ uv run route53-delegation delegate-subdomains --inventory artifacts/inventory.ya
 
 This prepares deletion of the migrated records from the parent zone after delegation. It preserves the new apex delegation `NS` record automatically.
 
-This operation uses the `source_zone` and `targets` stored in the inventory artifact as the source of truth. 
+This operation uses the `source_zone` and `targets` stored in the inventory artifact as the source of truth. If the inventory and manifest drift apart, `cleanup-parent` follows the inventory.
 
 ```bash
 uv run route53-delegation cleanup-parent --inventory artifacts/inventory.yaml --output artifacts/cleanup-parent.yaml
