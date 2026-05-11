@@ -402,6 +402,45 @@ def test_verify_delegation_writes_structured_results(tmp_path: Path) -> None:
     assert payload["targets"][0]["authoritative_checks"][0]["authoritative"] is True
 
 
+def test_verify_delegation_autogenerates_output_when_omitted(tmp_path: Path, monkeypatch) -> None:
+    inventory_path = tmp_path / "inventory.yaml"
+    inventory_path.write_text(
+        yaml.safe_dump(
+            {
+                "source_zone": {"name": "xyz.com.", "hosted_zone_id": "Z123", "private_zone": False},
+                "targets": [
+                    {
+                        "name": "abc.xyz.com.",
+                        "source_records": [
+                            {"Name": "a.abc.xyz.com.", "Type": "A", "TTL": 300, "ResourceRecords": [{"Value": "192.0.2.11"}]},
+                        ],
+                    }
+                ],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    fake_service = FakeRoute53Service()
+    args = SimpleNamespace(inventory=str(inventory_path), output=None)
+    monkeypatch.chdir(tmp_path)
+    with (
+        patch("route53_delegation.cli.create_route53_service", return_value=fake_service),
+        patch("route53_delegation.cli.dig_short", return_value=["ns-1.awsdns.com.", "ns-2.awsdns.net."]),
+        patch(
+            "route53_delegation.cli.dig_full",
+            side_effect=[
+                "abc.xyz.com. 300 IN NS ns-1.awsdns.com.\na.abc.xyz.com. 300 IN A 192.0.2.11\n",
+                ";; flags: qr aa rd ra;\n;; ANSWER SECTION:\na.abc.xyz.com. 300 IN A 192.0.2.11\n;; Query time: 1 msec\n",
+                ";; flags: qr aa rd ra;\n;; ANSWER SECTION:\na.abc.xyz.com. 300 IN A 192.0.2.11\n;; Query time: 1 msec\n",
+            ],
+        ),
+    ):
+        assert cli.run_verify_delegation(args) == 0
+    generated = sorted((tmp_path / "artifacts").glob("*verify-delegation*.yaml"))
+    assert len(generated) == 1
+
+
 def test_restore_ttl_dry_run_writes_restore_changes(tmp_path: Path) -> None:
     result_path = tmp_path / "reduce-ttl.yaml"
     result_path.write_text(
