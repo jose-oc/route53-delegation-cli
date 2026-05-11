@@ -126,15 +126,14 @@ def make_record_key(record: dict[str, Any]) -> str:
     return key
 
 
-def build_ttl_plan(manifest: Manifest, inventory_snapshot: dict[str, Any]) -> dict[str, Any]:
-    target_ttl_by_name = {fqdn(target.name): target.pre_cutover_ttl for target in manifest.targets}
+def build_ttl_plan(inventory_snapshot: dict[str, Any]) -> dict[str, Any]:
     plan_targets: list[dict[str, Any]] = []
     total_eligible = 0
     total_skipped = 0
 
     for target_snapshot in inventory_snapshot["targets"]:
         target_name = target_snapshot["name"]
-        desired_ttl = target_ttl_by_name[target_name]
+        desired_ttl = target_snapshot["pre_cutover_ttl"]
         eligible_records: list[dict[str, Any]] = []
         skipped_records: list[dict[str, Any]] = []
 
@@ -338,14 +337,14 @@ def build_restore_ttl_change_set(
 
 
 def build_undelegation_change_set(
-    manifest: Manifest,
+    target_names: list[str],
     live_parent_lookup: dict[str, dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     changes: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
 
-    for target in manifest.targets:
-        key = f"{fqdn(target.name)}|NS"
+    for target_name in target_names:
+        key = f"{fqdn(target_name)}|NS"
         live_record = live_parent_lookup.get(key)
         if live_record is None:
             skipped.append({"record_key": key, "reason": "delegation_record_missing_from_live_parent_zone"})

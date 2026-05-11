@@ -91,7 +91,7 @@ def test_plan_generation_preserves_eligible_and_skipped_records() -> None:
             {"name": "def.xyz.com.", "pre_cutover_ttl": 120, "records": []},
         ],
     }
-    plan_snapshot = build_ttl_plan(manifest(), inventory_snapshot)
+    plan_snapshot = build_ttl_plan(inventory_snapshot)
     abc_target = plan_snapshot["targets"][0]
     assert len(abc_target["eligible_ttl_updates"]) == 1
     assert len(abc_target["skipped_ttl_updates"]) == 2
@@ -271,7 +271,7 @@ def test_build_undelegation_change_set_deletes_live_ns_record() -> None:
     live_lookup = build_record_lookup(
         [{"Name": "abc.xyz.com.", "Type": "NS", "TTL": 300, "ResourceRecords": [{"Value": "ns-1.awsdns.com."}]}]
     )
-    changes, skipped = build_undelegation_change_set(manifest(), live_lookup)
+    changes, skipped = build_undelegation_change_set(["abc.xyz.com", "def.xyz.com"], live_lookup)
     assert len(changes) == 1
     assert changes[0]["Action"] == "DELETE"
     assert skipped[0]["reason"] == "delegation_record_missing_from_live_parent_zone"

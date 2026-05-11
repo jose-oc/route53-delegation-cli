@@ -30,6 +30,11 @@ The tool then:
 - only changes TTLs when you explicitly use `--apply`
 - uses dry-run by default for every mutating step
 
+Command inputs are intentionally split by source of truth:
+
+- use `manifest` when the command defines or discovers the intended migration scope
+- use `inventory`, `plan`, or prior result artifacts when the command should follow already captured state even if the manifest later drifts
+
 ## Requirements
 
 - Python `3.11` or newer
@@ -160,10 +165,10 @@ If `--output` is omitted, the tool writes a timestamped YAML file under `artifac
 
 ### 2. Generate a Plan
 
-This reads the manifest and the inventory snapshot, then writes a TTL-reduction plan.
+This reads the inventory snapshot and writes a TTL-reduction plan.
 
 ```bash
-uv run route53-delegation plan --manifest manifest.yaml --inventory artifacts/inventory.yaml --output artifacts/plan.yaml
+uv run route53-delegation plan --inventory artifacts/inventory.yaml --output artifacts/plan.yaml
 ```
 
 The plan includes:
@@ -176,28 +181,32 @@ The plan includes:
 
 By default, this is a dry-run. It builds the exact Route 53 change batch and writes the result to a YAML artifact without making changes in AWS.
 
+This operation uses the plan artifact as the source of truth for the target zone and TTL updates.
+
 ```bash
-uv run route53-delegation reduce-ttl --manifest manifest.yaml --plan artifacts/plan.yaml --output artifacts/reduce-ttl.yaml
+uv run route53-delegation reduce-ttl --plan artifacts/plan.yaml --output artifacts/reduce-ttl.yaml
 ```
 
 To actually apply the TTL updates:
 
 ```bash
-uv run route53-delegation reduce-ttl --manifest manifest.yaml --plan artifacts/plan.yaml --apply --output artifacts/reduce-ttl.yaml
+uv run route53-delegation reduce-ttl --plan artifacts/plan.yaml --apply --output artifacts/reduce-ttl.yaml
 ```
 
 ### 4. Create Child Hosted Zones
 
 This checks whether each target child zone already exists. In dry-run mode it reports what would be created. With `--apply`, it creates missing public hosted zones in Route 53.
 
+This operation uses the inventory artifact as the source of truth for the list of child zones to create.
+
 ```bash
-uv run route53-delegation create-child-zones --manifest manifest.yaml --output artifacts/create-child-zones.yaml
+uv run route53-delegation create-child-zones --inventory artifacts/inventory.yaml --output artifacts/create-child-zones.yaml
 ```
 
 To actually create missing child zones:
 
 ```bash
-uv run route53-delegation create-child-zones --manifest manifest.yaml --apply --output artifacts/create-child-zones.yaml
+uv run route53-delegation create-child-zones --inventory artifacts/inventory.yaml --apply --output artifacts/create-child-zones.yaml
 ```
 
 ### 5. Populate Child Hosted Zones
@@ -205,41 +214,45 @@ uv run route53-delegation create-child-zones --manifest manifest.yaml --apply --
 This reads the inventory snapshot and prepares the record copy into each child zone. Route 53-managed apex `NS` and `SOA` records are skipped automatically.
 
 ```bash
-uv run route53-delegation populate-child-zones --manifest manifest.yaml --inventory artifacts/inventory.yaml --output artifacts/populate-child-zones.yaml
+uv run route53-delegation populate-child-zones --inventory artifacts/inventory.yaml --output artifacts/populate-child-zones.yaml
 ```
 
 To actually populate the child zones:
 
 ```bash
-uv run route53-delegation populate-child-zones --manifest manifest.yaml --inventory artifacts/inventory.yaml --apply --output artifacts/populate-child-zones.yaml
+uv run route53-delegation populate-child-zones --inventory artifacts/inventory.yaml --apply --output artifacts/populate-child-zones.yaml
 ```
 
 ### 6. Add Parent-Zone Delegation Records
 
 This resolves the live child hosted zones, reads their Route 53 name servers, and prepares parent-zone `NS` delegation records.
 
+This operation uses the `source_zone` and `targets` stored in the inventory artifact as the source of truth.
+
 ```bash
-uv run route53-delegation delegate-subdomains --manifest manifest.yaml --output artifacts/delegate-subdomains.yaml
+uv run route53-delegation delegate-subdomains --inventory artifacts/inventory.yaml --output artifacts/delegate-subdomains.yaml
 ```
 
 To actually add the delegation records:
 
 ```bash
-uv run route53-delegation delegate-subdomains --manifest manifest.yaml --apply --output artifacts/delegate-subdomains.yaml
+uv run route53-delegation delegate-subdomains --inventory artifacts/inventory.yaml --apply --output artifacts/delegate-subdomains.yaml
 ```
 
 ### 7. Clean Up the Parent Zone
 
 This prepares deletion of the migrated records from the parent zone after delegation. It preserves the new apex delegation `NS` record automatically.
 
+This operation uses the `source_zone` and `targets` stored in the inventory artifact as the source of truth. 
+
 ```bash
-uv run route53-delegation cleanup-parent --manifest manifest.yaml --inventory artifacts/inventory.yaml --output artifacts/cleanup-parent.yaml
+uv run route53-delegation cleanup-parent --inventory artifacts/inventory.yaml --output artifacts/cleanup-parent.yaml
 ```
 
 To actually delete the migrated parent-zone records:
 
 ```bash
-uv run route53-delegation cleanup-parent --manifest manifest.yaml --inventory artifacts/inventory.yaml --apply --output artifacts/cleanup-parent.yaml
+uv run route53-delegation cleanup-parent --inventory artifacts/inventory.yaml --apply --output artifacts/cleanup-parent.yaml
 ```
 
 ### 8. Export a Zone File
@@ -261,7 +274,7 @@ Notes:
 This checks the live child hosted zones, compares the expected child-zone name servers with recursive `NS` resolution, and runs authoritative `dig` queries against the child-zone name servers for one sample record per target.
 
 ```bash
-uv run route53-delegation verify-delegation --manifest manifest.yaml --inventory artifacts/inventory.yaml --output artifacts/verify-delegation.yaml
+uv run route53-delegation verify-delegation --inventory artifacts/inventory.yaml --output artifacts/verify-delegation.yaml
 ```
 
 The verification artifact includes:
@@ -313,13 +326,13 @@ If you are rolling back immediately after a bad delegation, restoring parent rec
 This recreates the original migrated records in the parent zone from the inventory snapshot. It preserves the delegation `NS` record during the restore step.
 
 ```bash
-uv run route53-delegation restore-parent-records --manifest manifest.yaml --inventory artifacts/inventory.yaml --output artifacts/restore-parent-records.yaml
+uv run route53-delegation restore-parent-records --inventory artifacts/inventory.yaml --output artifacts/restore-parent-records.yaml
 ```
 
 To actually restore the records:
 
 ```bash
-uv run route53-delegation restore-parent-records --manifest manifest.yaml --inventory artifacts/inventory.yaml --apply --output artifacts/restore-parent-records.yaml
+uv run route53-delegation restore-parent-records --inventory artifacts/inventory.yaml --apply --output artifacts/restore-parent-records.yaml
 ```
 
 #### Remove Delegation Records
@@ -327,13 +340,13 @@ uv run route53-delegation restore-parent-records --manifest manifest.yaml --inve
 This deletes the parent-zone `NS` delegation records for the selected targets.
 
 ```bash
-uv run route53-delegation undelegate-subdomains --manifest manifest.yaml --output artifacts/undelegate-subdomains.yaml
+uv run route53-delegation undelegate-subdomains --inventory artifacts/inventory.yaml --output artifacts/undelegate-subdomains.yaml
 ```
 
 To actually remove the delegation:
 
 ```bash
-uv run route53-delegation undelegate-subdomains --manifest manifest.yaml --apply --output artifacts/undelegate-subdomains.yaml
+uv run route53-delegation undelegate-subdomains --inventory artifacts/inventory.yaml --apply --output artifacts/undelegate-subdomains.yaml
 ```
 
 #### Restore Original TTLs
@@ -341,53 +354,53 @@ uv run route53-delegation undelegate-subdomains --manifest manifest.yaml --apply
 This uses the artifact generated by `reduce-ttl` to put the original TTL values back.
 
 ```bash
-uv run route53-delegation restore-ttl --manifest manifest.yaml --result artifacts/reduce-ttl.yaml --output artifacts/restore-ttl.yaml
+uv run route53-delegation restore-ttl --result artifacts/reduce-ttl.yaml --output artifacts/restore-ttl.yaml
 ```
 
 To actually restore the TTLs:
 
 ```bash
-uv run route53-delegation restore-ttl --manifest manifest.yaml --result artifacts/reduce-ttl.yaml --apply --output artifacts/restore-ttl.yaml
+uv run route53-delegation restore-ttl --result artifacts/reduce-ttl.yaml --apply --output artifacts/restore-ttl.yaml
 ```
 
 ## Example Workflow
 
 ```bash
 uv run route53-delegation inventory --manifest manifest.yaml --output artifacts/inventory.yaml
-uv run route53-delegation plan --manifest manifest.yaml --inventory artifacts/inventory.yaml --output artifacts/plan.yaml
-uv run route53-delegation reduce-ttl --manifest manifest.yaml --plan artifacts/plan.yaml
-uv run route53-delegation create-child-zones --manifest manifest.yaml
-uv run route53-delegation populate-child-zones --manifest manifest.yaml --inventory artifacts/inventory.yaml
-uv run route53-delegation delegate-subdomains --manifest manifest.yaml
-uv run route53-delegation cleanup-parent --manifest manifest.yaml --inventory artifacts/inventory.yaml
+uv run route53-delegation plan --inventory artifacts/inventory.yaml --output artifacts/plan.yaml
+uv run route53-delegation reduce-ttl --plan artifacts/plan.yaml
+uv run route53-delegation create-child-zones --inventory artifacts/inventory.yaml
+uv run route53-delegation populate-child-zones --inventory artifacts/inventory.yaml
+uv run route53-delegation delegate-subdomains --inventory artifacts/inventory.yaml
+uv run route53-delegation cleanup-parent --inventory artifacts/inventory.yaml
 uv run route53-delegation export-zone-file --inventory artifacts/inventory.yaml --target abc.xyz.com --output artifacts/abc.xyz.com.zone
-uv run route53-delegation verify-delegation --manifest manifest.yaml --inventory artifacts/inventory.yaml
+uv run route53-delegation verify-delegation --inventory artifacts/inventory.yaml
 ```
 
 Then, once you have reviewed each dry-run artifact:
 
 ```bash
-uv run route53-delegation reduce-ttl --manifest manifest.yaml --plan artifacts/plan.yaml --apply
-uv run route53-delegation create-child-zones --manifest manifest.yaml --apply
-uv run route53-delegation populate-child-zones --manifest manifest.yaml --inventory artifacts/inventory.yaml --apply
-uv run route53-delegation delegate-subdomains --manifest manifest.yaml --apply
-uv run route53-delegation cleanup-parent --manifest manifest.yaml --inventory artifacts/inventory.yaml --apply
+uv run route53-delegation reduce-ttl --plan artifacts/plan.yaml --apply
+uv run route53-delegation create-child-zones --inventory artifacts/inventory.yaml --apply
+uv run route53-delegation populate-child-zones --inventory artifacts/inventory.yaml --apply
+uv run route53-delegation delegate-subdomains --inventory artifacts/inventory.yaml --apply
+uv run route53-delegation cleanup-parent --inventory artifacts/inventory.yaml --apply
 ```
 
 Example rollback workflow:
 
 ```bash
-uv run route53-delegation restore-parent-records --manifest manifest.yaml --inventory artifacts/inventory.yaml
-uv run route53-delegation undelegate-subdomains --manifest manifest.yaml
-uv run route53-delegation restore-ttl --manifest manifest.yaml --result artifacts/reduce-ttl.yaml
+uv run route53-delegation restore-parent-records --inventory artifacts/inventory.yaml
+uv run route53-delegation undelegate-subdomains --inventory artifacts/inventory.yaml
+uv run route53-delegation restore-ttl --result artifacts/reduce-ttl.yaml
 ```
 
 Then, once you have reviewed the rollback dry-run artifacts:
 
 ```bash
-uv run route53-delegation restore-parent-records --manifest manifest.yaml --inventory artifacts/inventory.yaml --apply
-uv run route53-delegation undelegate-subdomains --manifest manifest.yaml --apply
-uv run route53-delegation restore-ttl --manifest manifest.yaml --result artifacts/reduce-ttl.yaml --apply
+uv run route53-delegation restore-parent-records --inventory artifacts/inventory.yaml --apply
+uv run route53-delegation undelegate-subdomains --inventory artifacts/inventory.yaml --apply
+uv run route53-delegation restore-ttl --result artifacts/reduce-ttl.yaml --apply
 ```
 
 ## Running Tests
