@@ -227,6 +227,8 @@ uv run route53-delegation populate-child-zones --inventory artifacts/inventory.y
 
 This resolves the live child hosted zones, reads their Route 53 name servers, and prepares parent-zone `NS` delegation records.
 
+Before preparing each delegation, the command also checks the live parent zone for a conflicting apex `CNAME` at the delegated name. If it finds one, that target is marked as blocked with an explicit reason and operator guidance, and other non-conflicting targets still proceed.
+
 This operation uses the `source_zone` and `targets` stored in the inventory artifact as the source of truth.
 
 ```bash
@@ -238,6 +240,8 @@ To actually add the delegation records:
 ```bash
 uv run route53-delegation delegate-subdomains --inventory artifacts/inventory.yaml --apply --output artifacts/delegate-subdomains.yaml
 ```
+
+In that blocked case, the command does not send the conflicting target to Route 53, so you get a structured result artifact instead of a raw AWS validation error. Remove or replace the parent-zone apex `CNAME`, then rerun `delegate-subdomains`.
 
 ### 7. Clean Up the Parent Zone
 

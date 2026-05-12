@@ -311,6 +311,149 @@ def test_delegate_subdomains_apply_calls_parent_zone(tmp_path: Path) -> None:
     assert fake_service.applied_batches[0][0] == "Z123"
 
 
+def test_delegate_subdomains_blocks_parent_apex_cname_and_continues(tmp_path: Path) -> None:
+    inventory_path = tmp_path / "inventory.yaml"
+    inventory_path.write_text(
+        yaml.safe_dump(
+            {
+                "source_zone": {"name": "xyz.com.", "hosted_zone_id": "Z123", "private_zone": False},
+                "targets": [
+                    {"name": "abc.xyz.com.", "pre_cutover_ttl": 300},
+                    {"name": "def.xyz.com.", "pre_cutover_ttl": 120},
+                ],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "delegate-blocked.yaml"
+    fake_service = FakeRoute53Service()
+
+    def resolve_public_hosted_zone(zone_name: str, hosted_zone_id: str | None = None) -> dict[str, object]:
+        if zone_name == "abc.xyz.com":
+            return {"id": "ZCHILD1", "name": "abc.xyz.com.", "private_zone": False}
+        if zone_name == "def.xyz.com":
+            return {"id": "ZCHILD2", "name": "def.xyz.com.", "private_zone": False}
+        return {"id": hosted_zone_id or "Z123", "name": f"{zone_name}.", "private_zone": False}
+
+    def get_hosted_zone_details(hosted_zone_id: str) -> dict[str, object]:
+        if hosted_zone_id == "ZCHILD1":
+            return {
+                "id": "ZCHILD1",
+                "name": "abc.xyz.com.",
+                "private_zone": False,
+                "name_servers": ["ns-1.awsdns.com", "ns-2.awsdns.net"],
+            }
+        if hosted_zone_id == "ZCHILD2":
+            return {
+                "id": "ZCHILD2",
+                "name": "def.xyz.com.",
+                "private_zone": False,
+                "name_servers": ["ns-3.awsdns.org", "ns-4.awsdns.co.uk"],
+            }
+        return {
+            "id": hosted_zone_id,
+            "name": "xyz.com.",
+            "private_zone": False,
+            "name_servers": [],
+        }
+
+    fake_service.resolve_public_hosted_zone = resolve_public_hosted_zone  # type: ignore[method-assign]
+    fake_service.get_hosted_zone_details = get_hosted_zone_details  # type: ignore[method-assign]
+    fake_service.list_all_record_sets = lambda hosted_zone_id: [  # type: ignore[method-assign]
+        {
+            "Name": "abc.xyz.com.",
+            "Type": "CNAME",
+            "TTL": 300,
+            "ResourceRecords": [{"Value": "target.example.net."}],
+        }
+    ]
+
+    args = SimpleNamespace(inventory=str(inventory_path), output=str(output_path), apply=True)
+    with patch("route53_delegation.cli.create_route53_service", return_value=fake_service):
+        assert cli.run_delegate_subdomains(args) == 0
+    payload = yaml.safe_load(output_path.read_text(encoding="utf-8"))
+    assert payload["attempted_change_count"] == 1
+    assert payload["blocked_target_count"] == 1
+    assert payload["targets"] == [
+        {
+            "name": "abc.xyz.com.",
+            "status": "blocked",
+            "reason": "parent_apex_cname_conflicts_with_delegation",
+            "message": "Cannot create NS delegation for abc.xyz.com. because the parent zone still has a CNAME record at the same name.",
+            "blocking_record": {
+                "name": "abc.xyz.com.",
+                "type": "CNAME",
+                "ttl": 300,
+                "resource_records": ["target.example.net."],
+            },
+            "guidance": "Remove or replace the parent-zone apex CNAME before retrying delegate-subdomains.",
+        },
+        {
+            "name": "def.xyz.com.",
+            "status": "planned",
+            "change": {
+                "action": "UPSERT",
+                "record": {
+                    "Name": "def.xyz.com.",
+                    "Type": "NS",
+                    "TTL": 120,
+                    "ResourceRecords": [{"Value": "ns-3.awsdns.org."}, {"Value": "ns-4.awsdns.co.uk."}],
+                },
+            },
+        },
+    ]
+    assert payload["blocked_targets"][0]["reason"] == "parent_apex_cname_conflicts_with_delegation"
+    assert fake_service.applied_batches == [
+        (
+            "Z123",
+            [
+                {
+                    "Action": "UPSERT",
+                    "ResourceRecordSet": {
+                        "Name": "def.xyz.com.",
+                        "Type": "NS",
+                        "TTL": 120,
+                        "ResourceRecords": [{"Value": "ns-3.awsdns.org."}, {"Value": "ns-4.awsdns.co.uk."}],
+                    },
+                }
+            ],
+        )
+    ]
+
+
+def test_delegate_subdomains_prints_terminal_warning_for_blocked_target(tmp_path: Path, capsys) -> None:
+    inventory_path = tmp_path / "inventory.yaml"
+    inventory_path.write_text(
+        yaml.safe_dump(
+            {
+                "source_zone": {"name": "xyz.com.", "hosted_zone_id": "Z123", "private_zone": False},
+                "targets": [{"name": "abc.xyz.com.", "pre_cutover_ttl": 300}],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "delegate-warning.yaml"
+    fake_service = FakeRoute53Service()
+    fake_service.list_all_record_sets = lambda hosted_zone_id: [  # type: ignore[method-assign]
+        {
+            "Name": "abc.xyz.com.",
+            "Type": "CNAME",
+            "TTL": 300,
+            "ResourceRecords": [{"Value": "target.example.net."}],
+        }
+    ]
+    args = SimpleNamespace(inventory=str(inventory_path), output=str(output_path), apply=False)
+    with patch("route53_delegation.cli.create_route53_service", return_value=fake_service):
+        assert cli.run_delegate_subdomains(args) == 0
+    captured = capsys.readouterr()
+    assert "WARNING: delegation blocked for abc.xyz.com." in captured.err
+    assert "conflicting CNAME record at the same name" in captured.err
+    assert "Remove or replace that parent-zone record, then rerun delegate-subdomains." in captured.err
+    assert "Current record value(s): target.example.net." in captured.err
+
+
 def test_cleanup_parent_dry_run_skips_delegation_record(tmp_path: Path) -> None:
     inventory_path = tmp_path / "inventory.yaml"
     inventory_path.write_text(

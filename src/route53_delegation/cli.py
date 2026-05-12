@@ -13,7 +13,7 @@ from route53_delegation.aws import Route53Service
 from route53_delegation.core import (
     build_child_zone_change_set,
     chunk_changes,
-    build_delegation_change_set,
+    build_delegation_change_plan,
     build_inventory_snapshot,
     build_parent_cleanup_change_set,
     build_record_lookup,
@@ -265,6 +265,8 @@ def run_delegate_subdomains(args: argparse.Namespace) -> int:
         zone_name=source_zone["name"],
         hosted_zone_id=source_zone["hosted_zone_id"],
     )
+    live_parent_records = service.list_all_record_sets(parent_zone["id"])
+    live_parent_lookup = build_record_lookup(live_parent_records)
     child_zone_details: dict[str, dict[str, Any]] = {}
     inventory_targets = inventory_snapshot["targets"]
     for target_snapshot in inventory_targets:
@@ -273,7 +275,33 @@ def run_delegate_subdomains(args: argparse.Namespace) -> int:
         child_zone_details[target_name] = service.get_hosted_zone_details(child_zone["id"])
 
     manifest_like = type("ManifestLike", (), {"targets": [type("TargetLike", (), {"name": target["name"].rstrip("."), "pre_cutover_ttl": target["pre_cutover_ttl"]}) for target in inventory_targets]})()
-    changes = build_delegation_change_set(manifest_like, child_zone_details)
+    changes, blocked_targets = build_delegation_change_plan(manifest_like, child_zone_details, live_parent_lookup)
+    change_by_name = {change["ResourceRecordSet"]["Name"]: change for change in changes}
+    blocked_by_name = {blocked["target"]: blocked for blocked in blocked_targets}
+    targets_output: list[dict[str, Any]] = []
+    for target_snapshot in inventory_targets:
+        target_name = target_snapshot["name"]
+        blocked = blocked_by_name.get(target_name)
+        if blocked is not None:
+            targets_output.append(
+                {
+                    "name": target_name,
+                    "status": "blocked",
+                    "reason": blocked["reason"],
+                    "message": blocked["message"],
+                    "blocking_record": blocked["blocking_record"],
+                    "guidance": blocked["guidance"],
+                }
+            )
+            continue
+        change = change_by_name[target_name]
+        targets_output.append(
+            {
+                "name": target_name,
+                "status": "planned",
+                "change": {"action": change["Action"], "record": change["ResourceRecordSet"]},
+            }
+        )
     result: dict[str, Any] = {
         "schema_version": 1,
         "source_zone": {
@@ -283,10 +311,26 @@ def run_delegate_subdomains(args: argparse.Namespace) -> int:
         },
         "mode": "apply" if args.apply else "dry-run",
         "attempted_change_count": len(changes),
+        "blocked_target_count": len(blocked_targets),
+        "blocked_targets": blocked_targets,
+        "targets": targets_output,
         "changes": [{"action": change["Action"], "record": change["ResourceRecordSet"]} for change in changes],
     }
     if args.apply and changes:
         result["aws_change_info"] = _apply_changes_in_batches(service, parent_zone["id"], changes)
+
+    for blocked in blocked_targets:
+        blocking_record = blocked["blocking_record"]
+        print(
+            (
+                "WARNING: delegation blocked for "
+                f"{blocked['target']} because the parent zone still has a conflicting "
+                f"{blocking_record['type']} record at the same name. "
+                f"Remove or replace that parent-zone record, then rerun delegate-subdomains. "
+                f"Current record value(s): {', '.join(blocking_record.get('resource_records', []))}"
+            ),
+            file=sys.stderr,
+        )
 
     output_path = Path(args.output) if args.output else default_output_path("delegate-subdomains", inventory_snapshot["source_zone"]["name"])
     dump_yaml_file(output_path, result)
