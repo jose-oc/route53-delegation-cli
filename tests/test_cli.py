@@ -81,6 +81,14 @@ def write_manifest(tmp_path: Path) -> Path:
     return path
 
 
+def test_version_command_prints_package_version(capsys) -> None:
+    parser = cli.build_parser()
+    args = parser.parse_args(["version"])
+    with patch("route53_delegation.cli._package_version", return_value="1.2.3"):
+        assert args.func(args) == 0
+    assert capsys.readouterr().out.strip() == "1.2.3"
+
+
 def test_inventory_command_writes_yaml_snapshot(tmp_path: Path) -> None:
     manifest_path = write_manifest(tmp_path)
     output_path = tmp_path / "inventory.yaml"
