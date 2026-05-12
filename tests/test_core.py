@@ -5,6 +5,7 @@ from route53_delegation.core import (
     SKIP_ALREADY_SET,
     SKIP_NS,
     build_child_zone_change_set,
+    build_delegation_change_plan,
     build_delegation_change_set,
     build_inventory_snapshot,
     build_parent_cleanup_change_set,
@@ -174,6 +175,42 @@ def test_build_delegation_change_set_uses_child_zone_name_servers() -> None:
     assert changes[0]["ResourceRecordSet"]["Type"] == "NS"
     assert changes[0]["ResourceRecordSet"]["Name"] == "abc.xyz.com."
     assert changes[0]["ResourceRecordSet"]["ResourceRecords"][0]["Value"] == "ns-1.awsdns.com."
+
+
+def test_build_delegation_change_plan_blocks_parent_apex_cname_conflicts() -> None:
+    changes, blocked = build_delegation_change_plan(
+        manifest(),
+        {
+            "abc.xyz.com": {"name_servers": ["ns-1.awsdns.com", "ns-2.awsdns.net"]},
+            "def.xyz.com": {"name_servers": ["ns-3.awsdns.org", "ns-4.awsdns.co.uk"]},
+        },
+        build_record_lookup(
+            [
+                {
+                    "Name": "abc.xyz.com.",
+                    "Type": "CNAME",
+                    "TTL": 300,
+                    "ResourceRecords": [{"Value": "target.example.net."}],
+                }
+            ]
+        ),
+    )
+    assert len(changes) == 1
+    assert changes[0]["ResourceRecordSet"]["Name"] == "def.xyz.com."
+    assert blocked == [
+        {
+            "target": "abc.xyz.com.",
+            "reason": "parent_apex_cname_conflicts_with_delegation",
+            "message": "Cannot create NS delegation for abc.xyz.com. because the parent zone still has a CNAME record at the same name.",
+            "blocking_record": {
+                "name": "abc.xyz.com.",
+                "type": "CNAME",
+                "ttl": 300,
+                "resource_records": ["target.example.net."],
+            },
+            "guidance": "Remove or replace the parent-zone apex CNAME before retrying delegate-subdomains.",
+        }
+    ]
 
 
 def test_parent_cleanup_change_set_skips_delegation_and_deletes_live_records() -> None:

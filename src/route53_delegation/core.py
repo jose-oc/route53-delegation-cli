@@ -265,9 +265,29 @@ def build_delegation_record(target_name: str, ttl: int, name_servers: list[str])
     }
 
 
-def build_delegation_change_set(manifest: Manifest, child_zone_details: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+def build_delegation_change_plan(
+    manifest: Manifest,
+    child_zone_details: dict[str, dict[str, Any]],
+    live_parent_lookup: dict[str, dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     changes: list[dict[str, Any]] = []
+    blocked: list[dict[str, Any]] = []
     for target in manifest.targets:
+        conflicting_cname = live_parent_lookup.get(f"{fqdn(target.name)}|CNAME")
+        if conflicting_cname is not None:
+            blocked.append(
+                {
+                    "target": fqdn(target.name),
+                    "reason": "parent_apex_cname_conflicts_with_delegation",
+                    "message": (
+                        f"Cannot create NS delegation for {fqdn(target.name)} because the parent zone still has "
+                        "a CNAME record at the same name."
+                    ),
+                    "blocking_record": summarize_record(conflicting_cname),
+                    "guidance": "Remove or replace the parent-zone apex CNAME before retrying delegate-subdomains.",
+                }
+            )
+            continue
         details = child_zone_details[target.name]
         changes.append(
             {
@@ -279,6 +299,11 @@ def build_delegation_change_set(manifest: Manifest, child_zone_details: dict[str
                 ),
             }
         )
+    return changes, blocked
+
+
+def build_delegation_change_set(manifest: Manifest, child_zone_details: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    changes, _ = build_delegation_change_plan(manifest, child_zone_details, {})
     return changes
 
 
