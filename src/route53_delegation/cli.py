@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -32,6 +33,9 @@ from route53_delegation.manifest import load_manifest
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="route53-delegation")
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    version_parser = subparsers.add_parser("version", help="Print the installed route53-delegation version")
+    version_parser.set_defaults(func=run_version)
 
     inventory_parser = subparsers.add_parser("inventory", help="Snapshot selected records from the parent hosted zone")
     inventory_parser.add_argument("--manifest", required=True, help="Path to the manifest YAML file")
@@ -107,6 +111,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def create_route53_service() -> Route53Service:
     return Route53Service(boto3.client("route53"))
+
+
+def run_version(args: argparse.Namespace) -> int:
+    del args
+    print(_package_version())
+    return 0
 
 
 def run_inventory(args: argparse.Namespace) -> int:
@@ -552,6 +562,13 @@ def _apply_changes_in_batches(service: Route53Service, hosted_zone_id: str, chan
         "batch_count": len(batch_results),
         "batches": batch_results,
     }
+
+
+def _package_version() -> str:
+    try:
+        return importlib.metadata.version("route53-delegation-cli")
+    except importlib.metadata.PackageNotFoundError:
+        return "0.2.0"
 
 
 def main() -> int:
