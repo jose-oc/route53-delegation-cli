@@ -37,7 +37,7 @@ Command inputs are intentionally split by source of truth:
 
 ## Requirements
 
-- Python `3.11` or newer
+- Python `3.14` or newer
 - AWS credentials with Route 53 read access for `inventory` and `plan`
 - AWS credentials with Route 53 write access for `reduce-ttl --apply`, `create-child-zones --apply`, `populate-child-zones --apply`, `delegate-subdomains --apply`, `cleanup-parent --apply`, `restore-ttl --apply`, `undelegate-subdomains --apply`, and `restore-parent-records --apply`
 - `uv` recommended for local development and test runs
