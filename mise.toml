@@ -8,7 +8,6 @@ python.uv_venv_auto = "create|source"
 [env]
 UV_PYTHON = { value = "{{ tools.python.path }}", tools = true }
 UV_CACHE_DIR = "{{config_root}}/.uv-cache"
-_.path = ["bin"]
 
 [tasks.sync]
 description = "Sync the project environment"
