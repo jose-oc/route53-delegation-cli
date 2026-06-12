@@ -3,7 +3,7 @@ name = "route53-delegation-cli"
 version = "0.3.0"
 description = "CLI helpers for preparing Route 53 subdomain delegation"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.14"
 dependencies = [
   "boto3>=1.35.0",
   "PyYAML>=6.0.2",
